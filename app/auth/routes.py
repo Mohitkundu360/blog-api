@@ -4,6 +4,8 @@ from app.schemas import UserCreate, UserOut
 from app.models import User
 from app.database import get_db
 from app.utils import hash_password
+from app.utils.security import hash_password
+
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 

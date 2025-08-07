@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from jose import jwt
 
-SECRET_KEY = "your-secret-key"
+SECRET_KEY = "your-secret-key"  # 🔐 Consider loading this from .env
 ALGORITHM = "HS256"
 
 def create_access_token(data: dict, expires_delta: timedelta = None):

@@ -1,103 +1,92 @@
-from datetime import datetime, timedelta, timezone
-import os
-
-from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
-from passlib.context import CryptContext
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import and_
+from typing import List
 
-from app import models, schemas
-from app.database import SessionLocal
+from app import schemas
+from app.models import Post, User
+from app.database import get_db
+from app.routers.auth import get_current_user
 
-# --------- Load environment variables ---------
-load_dotenv()
+router = APIRouter(
+    prefix="/posts",
+    tags=["Posts"]
+)
 
-# --------- Constants and Security Config ---------
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")  # Use .env for production
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-# --------- Password Hashing Setup ---------
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
-
-
-# --------- Token Auth Setup ---------
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
-
-
-def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-
-# --------- Dependency: DB Session ---------
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-# --------- Get Current User ---------
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    credentials_exception = HTTPException(
-        status_code=401,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
+# --------- Create Post ---------
+@router.post("/", response_model=schemas.PostOut)
+def create_post(
+    post: schemas.PostCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    new_post = Post(
+        title=post.title,
+        content=post.content,
+        owner_id=current_user.id
     )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-        if email is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-
-    user = db.query(models.User).filter(models.User.email == email).first()
-    if user is None:
-        raise credentials_exception
-
-    return user
-
-
-# --------- Auth Router ---------
-router = APIRouter(prefix="/auth", tags=["Auth"])
-
-
-# --------- Register ---------
-@router.post("/register", response_model=schemas.UserOut)
-def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    existing_user = db.query(models.User).filter(models.User.email == user.email).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    hashed_pw = get_password_hash(user.password)
-    new_user = models.User(username=user.username, email=user.email, password=hashed_pw)
-    db.add(new_user)
+    db.add(new_post)
     db.commit()
-    db.refresh(new_user)
-    return new_user
+    db.refresh(new_post)
+    return new_post
 
 
-# --------- Login ---------
-@router.post("/login", response_model=schemas.TokenResponse)
-def login(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(models.User.email == user.email).first()
-    if not db_user or not verify_password(user.password, db_user.password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+# --------- Get All Posts (owned by current user only) ---------
+@router.get("/", response_model=List[schemas.PostOut])
+def get_all_posts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    return db.query(Post).filter(Post.owner_id == current_user.id).all()  # type: ignore
 
-    access_token = create_access_token(data={"sub": db_user.email})
-    return {"access_token": access_token, "token_type": "bearer"}
+# --------- Get Single Post (if owned) ---------
+@router.get("/{post_id}", response_model=schemas.PostOut)
+def get_post(
+    post_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    post = db.query(Post).filter(
+        and_(Post.id == post_id, Post.owner_id == current_user.id)
+    ).first()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    return post
+
+
+# --------- Delete Post ---------
+@router.delete("/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_post(
+    post_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    post = db.query(Post).filter(
+        and_(Post.id == post_id, Post.owner_id == current_user.id)
+    ).first()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    db.delete(post)
+    db.commit()
+    return None
+
+
+# --------- Update Post ---------
+@router.put("/{post_id}", response_model=schemas.PostOut)
+def update_post(
+    post_id: int,
+    updated_post: schemas.PostCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    post = db.query(Post).filter(
+        and_(Post.id == post_id, Post.owner_id == current_user.id)
+    ).first()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    post.title = updated_post.title
+    post.content = updated_post.content
+    db.commit()
+    db.refresh(post)
+    return post
